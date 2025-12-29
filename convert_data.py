@@ -163,7 +163,7 @@ def main(args):
     print(f"Loading image cache from {args.image_cache}...")
     with open(args.image_cache, 'rb') as f:
         image_features = pickle.load(f)
-    print(f"Loaded {len(image_features)} cached images")
+    print(f"✓ Loaded {len(image_features)} cached images")
     
     # Initialize Stanza
     print("Initializing Stanza NLP pipeline...")
@@ -172,16 +172,18 @@ def main(args):
     except:
         pass
     nlp = stanza.Pipeline('en', processors='tokenize,pos,lemma,depparse', verbose=False)
+    print("✓ Stanza initialized")
     
     # Load input data
     print(f"Loading {args.input}...")
     with open(args.input, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    print(f"Loaded {len(data)} samples")
+    print(f"✓ Loaded {len(data)} samples")
     
     # Filter samples with valid images
-    valid_data = [s for s in data if s.get("photo_url") in image_features]
-    print(f"Valid samples (with cached images): {len(valid_data)}")
+    print("Filtering samples with cached images...")
+    valid_data = [s for s in tqdm(data, desc="Filtering") if s.get("photo_url") in image_features]
+    print(f"✓ Valid samples: {len(valid_data)} / {len(data)}")
     
     # Split data
     train_data, temp_data = train_test_split(
@@ -200,18 +202,24 @@ def main(args):
     
     # Convert and save each split
     for split_name, split_data in [("train", train_data), ("dev", val_data), ("test", test_data)]:
-        print(f"\nConverting {split_name} set...")
+        print(f"\n{'='*50}")
+        print(f"Converting {split_name} set ({len(split_data)} samples)...")
         converted = []
-        for sample in tqdm(split_data, desc=f"Converting {split_name}"):
+        errors = 0
+        pbar = tqdm(split_data, desc=f"Converting {split_name}", unit="sample")
+        for sample in pbar:
             try:
                 result = convert_sample(sample, image_features, nlp)
                 converted.append(result)
+                pbar.set_postfix({"converted": len(converted), "errors": errors})
             except Exception as e:
-                print(f"Error converting sample: {e}")
+                errors += 1
+                pbar.set_postfix({"converted": len(converted), "errors": errors})
                 continue
         
         output_dir = os.path.join(args.output, split_name)
         save_as_pkl(converted, output_dir, args.batch_size)
+        print(f"✓ {split_name}: {len(converted)} samples saved ({errors} errors)")
     
     print("\n=== Conversion Complete ===")
     print(f"Output directory: {args.output}")
