@@ -17,13 +17,19 @@ DASCO/
 
 ## Step 1: Cache Image Features
 
-Thời gian: ~30-60 phút
+Thời gian: ~10-15 phút (với GPU)
 
 ```bash
 python cache_images.py \
     --input ./data/text_image_dataset.json \
-    --output ./image_cache/features.pkl
+    --output ./image_cache/features.pkl \
+    --batch_size 16 \
+    --workers 32
 ```
+
+**Tham số:**
+- `--batch_size`: Số ảnh xử lý cùng lúc (tăng nếu có nhiều VRAM)
+- `--workers`: Số luồng download song song
 
 **Output:** `./image_cache/features.pkl`
 

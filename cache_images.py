@@ -106,7 +106,7 @@ def main(args):
     
     # Step 1: Download all images in parallel
     print(f"\n{'='*50}")
-    print("Step 1: Downloading images (parallel, {args.workers} workers)...")
+    print(f"Step 1: Downloading images (parallel, {args.workers} workers)...")
     urls = list(url_to_id.keys())
     url_to_image, failed_urls = download_images_parallel(urls, max_workers=args.workers)
     print(f"✓ Downloaded: {len(url_to_image)}, Failed: {len(failed_urls)}")
