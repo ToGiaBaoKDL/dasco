@@ -84,7 +84,7 @@ def main(args):
     processor = Blip2Processor.from_pretrained("Salesforce/blip2-opt-2.7b")
     model = Blip2Model.from_pretrained(
         "Salesforce/blip2-opt-2.7b",
-        torch_dtype=torch.float16 if device.type == "cuda" else torch.float32
+        dtype=torch.float16 if device.type == "cuda" else torch.float32
     ).to(device)
     model.eval()
     print("✓ BLIP-2 model loaded!")
