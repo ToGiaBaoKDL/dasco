@@ -10,12 +10,13 @@ import os
 import numpy as np
 import stanza
 import argparse
+import torch
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 import warnings
 warnings.filterwarnings("ignore")
 
-# Polarity mapping
+# Polarity mapping - must match ParseData expected format
 POLARITY_MAP = {
     "Positive": "POS",
     "Negative": "NEG",
@@ -37,7 +38,7 @@ def run_dependency_parsing(text: str, nlp) -> dict:
             for word in sent.words:
                 tokens.append(word.text)
                 postag.append(word.upos)
-                edges.append(word.head)
+                edges.append(word.head)  # head index (1-indexed, 0 for root)
                 deprels.append(word.deprel)
         
         return {
@@ -50,19 +51,29 @@ def run_dependency_parsing(text: str, nlp) -> dict:
         print(f"Parsing error: {e}")
         # Fallback: simple tokenization
         tokens = text.split()
+        n = len(tokens)
         return {
             "token": tokens,
-            "postag": ["NOUN"] * len(tokens),
-            "edges": list(range(len(tokens))),
-            "deprels": ["dep"] * len(tokens)
+            "postag": ["NOUN"] * n,
+            "edges": [0] + list(range(1, n)),  # Simple chain dependency
+            "deprels": ["root"] + ["dep"] * (n - 1) if n > 0 else []
         }
 
 
-def create_scope(aspect_from: int, aspect_to: int, text_len: int, window: int = 3) -> list:
-    """Create scope window around aspect."""
-    left = max(0, aspect_from - window)
-    right = min(text_len - 1, aspect_to + window)
-    return [left, right]
+def create_scope_offsets(aspect_from: int, aspect_to: int, text_len: int, window: int = 3) -> list:
+    """
+    Create scope as [left_offset, right_offset].
+    ParseData expects: aspect_scope = [id_b - s_b, s_e - id_e]
+    So we need to return [start_pos, end_pos] where:
+    - start_pos = aspect_from - left_offset
+    - end_pos = aspect_to + right_offset
+    """
+    left_offset = min(window, aspect_from)
+    right_offset = min(window, text_len - 1 - aspect_to) if text_len > 0 else 0
+    # scope format: [start_pos, end_pos] of the scope window
+    start_pos = aspect_from - left_offset
+    end_pos = aspect_to + right_offset
+    return [start_pos, end_pos]
 
 
 def convert_sample(sample: dict, image_features: dict, nlp) -> dict:
@@ -73,7 +84,6 @@ def convert_sample(sample: dict, image_features: dict, nlp) -> dict:
     if url in image_features:
         image_feature = image_features[url]["features"]
     else:
-        # Create dummy features if not found (should not happen normally)
         print(f"Warning: Image not found in cache: {url[:50]}...")
         image_feature = np.zeros((257, 1408), dtype=np.float32)
     
@@ -82,11 +92,11 @@ def convert_sample(sample: dict, image_features: dict, nlp) -> dict:
     
     # Text processing
     text = sample.get("review", "")
-    text_tokens = text.split()
-    text_len = len(text_tokens)
     
-    # Dependency parsing
+    # Dependency parsing - MUST run before building aspects
     parse_result = run_dependency_parsing(text, nlp)
+    text_tokens = parse_result["token"]  # Use parsed tokens, not simple split
+    text_len = len(text_tokens)
     
     # Build aspects with polarity and scope
     aspects = []
@@ -98,32 +108,48 @@ def convert_sample(sample: dict, image_features: dict, nlp) -> dict:
             opinion_categories[i] if i < len(opinion_categories) else "Unknown",
             "NEU"
         )
-        scope = create_scope(aspect["from"], aspect["to"], text_len)
+        
+        # Validate aspect positions
+        aspect_from = aspect["from"]
+        aspect_to = aspect["to"]
+        
+        # Clamp to valid range
+        aspect_from = max(0, min(aspect_from, text_len - 1)) if text_len > 0 else 0
+        aspect_to = max(0, min(aspect_to, text_len - 1)) if text_len > 0 else 0
+        
+        # Create scope window
+        scope = create_scope_offsets(aspect_from, aspect_to, text_len)
+        
         aspects.append({
             "term": aspect["term"],
-            "from": aspect["from"],
-            "to": aspect["to"],
+            "from": aspect_from,
+            "to": aspect_to,
             "polarity": polarity,
             "scope": scope
         })
     
-    # Build nouns (use aspects as nouns)
+    # Build nouns from aspects (each aspect term is also a noun)
     nouns = []
     for aspect in aspects:
         nouns.append({
             "term": aspect["term"],
             "from": aspect["from"],
             "to": aspect["to"],
-            "scope": aspect["scope"]
+            "scope": aspect["scope"]  # Same scope format
         })
     
-    # Query input and text input
+    # Query input
     query_input = "Extract aspect terms and their sentiment polarity"
+    
+    # Target: list of aspect terms
     target = [asp["term"] for asp in aspects] if aspects else [text]
     
-    # Parse info for DASCO format
+    # Parse info - critical structure for ParseData function
     parse_info = {
-        **parse_result,
+        "token": parse_result["token"],
+        "postag": parse_result["postag"],
+        "edges": parse_result["edges"],
+        "deprels": parse_result["deprels"],
         "aspects": [{
             "term": asp["term"],
             "from": asp["from"],
@@ -148,6 +174,9 @@ def save_as_pkl(data: list, output_dir: str, batch_size: int = 100):
     """Save data as pkl files in batches."""
     os.makedirs(output_dir, exist_ok=True)
     
+    # Calculate number of batches
+    num_batches = (len(data) + batch_size - 1) // batch_size
+    
     for i in range(0, len(data), batch_size):
         batch = data[i:i + batch_size]
         batch_idx = i // batch_size
@@ -155,7 +184,7 @@ def save_as_pkl(data: list, output_dir: str, batch_size: int = 100):
         with open(output_path, 'wb') as f:
             pickle.dump(batch, f)
     
-    print(f"Saved {len(data)} samples to {output_dir} ({len(data) // batch_size + 1} files)")
+    print(f"Saved {len(data)} samples to {output_dir} ({num_batches} files)")
 
 
 def main(args):
@@ -165,14 +194,20 @@ def main(args):
         image_features = pickle.load(f)
     print(f"✓ Loaded {len(image_features)} cached images")
     
-    # Initialize Stanza
+    # Initialize Stanza with GPU if available
     print("Initializing Stanza NLP pipeline...")
+    use_gpu = torch.cuda.is_available()
     try:
         stanza.download('en', verbose=False)
     except:
         pass
-    nlp = stanza.Pipeline('en', processors='tokenize,pos,lemma,depparse', verbose=False)
-    print("✓ Stanza initialized")
+    nlp = stanza.Pipeline(
+        'en', 
+        processors='tokenize,pos,lemma,depparse', 
+        verbose=False,
+        use_gpu=use_gpu
+    )
+    print(f"✓ Stanza initialized (GPU: {use_gpu})")
     
     # Load input data
     print(f"Loading {args.input}...")
@@ -184,6 +219,10 @@ def main(args):
     print("Filtering samples with cached images...")
     valid_data = [s for s in tqdm(data, desc="Filtering") if s.get("photo_url") in image_features]
     print(f"✓ Valid samples: {len(valid_data)} / {len(data)}")
+    
+    if len(valid_data) == 0:
+        print("ERROR: No valid samples found! Check image cache.")
+        return
     
     # Split data
     train_data, temp_data = train_test_split(
