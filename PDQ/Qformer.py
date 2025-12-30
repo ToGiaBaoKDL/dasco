@@ -36,26 +36,56 @@ from transformers.modeling_outputs import (
     SequenceClassifierOutput,
     TokenClassifierOutput,
 )
-from transformers.modeling_utils import (
-    PreTrainedModel,
-    find_pruneable_heads_and_indices,
-    prune_linear_layer,
-)
+from transformers.modeling_utils import PreTrainedModel
 
-# Handle transformers version compatibility
+# Handle transformers version compatibility for moved functions
+try:
+    from transformers.modeling_utils import find_pruneable_heads_and_indices, prune_linear_layer
+except ImportError:
+    try:
+        from transformers.pytorch_utils import find_pruneable_heads_and_indices, prune_linear_layer
+    except ImportError:
+        # Fallback implementations
+        def find_pruneable_heads_and_indices(heads, n_heads, head_size, already_pruned_heads):
+            mask = torch.ones(n_heads, head_size)
+            heads = set(heads) - already_pruned_heads
+            for head in heads:
+                head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+                mask[head] = 0
+            mask = mask.view(-1).contiguous().eq(1)
+            index = torch.arange(len(mask))[mask].long()
+            return heads, index
+        
+        def prune_linear_layer(layer, index, dim=0):
+            W = layer.weight.index_select(dim, index).clone().detach()
+            if layer.bias is not None:
+                if dim == 0:
+                    b = layer.bias[index].clone().detach()
+                else:
+                    b = layer.bias.clone().detach()
+            new_size = list(layer.weight.size())
+            new_size[dim] = len(index)
+            new_layer = nn.Linear(new_size[1], new_size[0], bias=layer.bias is not None)
+            new_layer.weight.requires_grad = False
+            new_layer.weight.copy_(W.contiguous())
+            new_layer.weight.requires_grad = True
+            if layer.bias is not None:
+                new_layer.bias.requires_grad = False
+                new_layer.bias.copy_(b.contiguous())
+                new_layer.bias.requires_grad = True
+            return new_layer
+
 try:
     from transformers.modeling_utils import apply_chunking_to_forward
 except ImportError:
-    # For newer transformers versions, use pytorch_utils
     try:
         from transformers.pytorch_utils import apply_chunking_to_forward
     except ImportError:
-        # Fallback: define the function locally
         def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
             if chunk_size > 0:
-                # Simple implementation without chunking for compatibility
                 return forward_fn(*input_tensors)
             return forward_fn(*input_tensors)
+
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
 
